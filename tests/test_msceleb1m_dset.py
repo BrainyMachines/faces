@@ -6,11 +6,13 @@ from PIL import Image
 
 class DatasetTester(unittest.TestCase):
 
-    root = os.path.expanduser('/data/datasets')
+    data_root = os.path.expanduser('/data/datasets')
+    img_root = os.path.expanduser('/data/datasets/msceleb1m_images')
 
     def test_msceleb1m_dset(self):
         """Test Case for accessing MSCeleb1M dataset."""
-        dset = datasets.MSCeleb1M(self.root, 'msceleb1m', download=False)
+        dset = datasets.MSCeleb1M(self.data_root, self.img_root, 'msceleb1m',
+                                  download=False)
         img, target = dset[898]
         img.save('test_image.jpg')
         print('#images:', len(dset))
