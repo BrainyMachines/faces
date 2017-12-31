@@ -16,10 +16,51 @@ import sd_utils as utils
 from copy import deepcopy
 import torch
 import torch.nn as nn
+import torchvision.datasets as datasets
+import torchvision.transforms as transforms
+import torch.utils.data as data
 
 
 def main(args):
-    print(args)
+
+    args.dset_root = os.path.join(args.sm.scratch_dir, args.data, args.dset_name)
+    # print(arg.dset_root, os.path.exists(args.dset_root))
+
+    # Transforms
+    transforms_train = transforms.Compose([
+                        transforms.Resize(args.imsize),
+                        transforms.RandomHorizontalFlip(),
+                        transforms.ToTensor(),
+                        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                             std=[0.229, 0.224, 0.225])
+                      ])        
+
+    transforms_val = transforms.Compose([
+                        transforms.Resize(args.imsize),
+                        transforms.ToTensor(),
+                        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                             std=[0.229, 0.224, 0.225])
+                      ])        
+
+    # Dataset
+    args.dset_root_train = os.path.join(args.dset_root, 'train')
+    train_dset = datasets.ImageFolder(args.dset_root_train, transforms_train)
+
+    args.dset_root_val = os.path.join(args.dset_root, 'val')
+    val_dset = datasets.ImageFolder(args.dset_root_val, transforms_val)
+
+    # Data Loader 
+    train_loader = data.DataLoader(train_dset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
+    val_loader = data.DataLoader(val_dset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+
+    # Uncomment to test data loader
+    # itr = iter(train_loader)
+    #img, target = next(itr)
+    # print(img)
+    # print(target)    
+    # pdb.set_trace()
+
+
 
 if __name__ == '__main__':
 
@@ -55,10 +96,14 @@ if __name__ == '__main__':
                             help='id of the GPU to run job on')
         parser.add_argument('--num_workers', default=8, type=int,
                             help='number of worker processes (defult: 8)')
-        parser.add_argument('--imsize', default=256, type=int,
+        parser.add_argument('--imsize', default=224, type=int,
                             help='image size (default: 256)')
         parser.add_argument('--num_channels', default=3, type=int,
                             help='num of channels 3: colored, 1: grayscale (default: 3)')
+        parser.add_argument('--dset_name', type=str, default='celeb10',
+                            help='dataset name (default:celeb10)')
+        parser.add_argument('--batch_size', type=int, default=16,
+                            help='minibatch size (default: 16')
       
         args = parser.parse_args()
         args.sm = sm
