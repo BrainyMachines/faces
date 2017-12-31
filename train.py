@@ -19,6 +19,7 @@ import torch.nn as nn
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 import torch.utils.data as data
+import torchvision.models as models
 
 
 def main(args):
@@ -60,6 +61,16 @@ def main(args):
     # print(target)    
     # pdb.set_trace()
 
+    # Model
+    if args.pretrained:
+        print("=> using pre-trained model '{}'".format(args.arch))
+        model = models.__dict__[args.arch](pretrained=True)
+    else:
+        print("=> creating model '{}'".format(args.arch))
+        model = models.__dict__[args.arch]()
+
+    model = model.cuda()
+
 
 
 if __name__ == '__main__':
@@ -78,6 +89,12 @@ if __name__ == '__main__':
     start_ctime = time.clock()
     try:
         sm = utils.StorageManager()
+
+
+        model_names = sorted(name for name in models.__dict__
+            if name.islower() and not name.startswith("__")
+            and callable(models.__dict__[name]))
+
 
         parser = argparse.ArgumentParser(description='Face verification training code')
         parser.add_argument('--data', type=str, default='datasets/facescrub_images',
@@ -104,6 +121,10 @@ if __name__ == '__main__':
                             help='dataset name (default:celeb10)')
         parser.add_argument('--batch_size', type=int, default=16,
                             help='minibatch size (default: 16')
+        parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet18',choices=model_names,
+                            help='model architecture: ' + ' | '.join(model_names) + ' (default: resnet18)')
+        parser.add_argument('--pretrained', dest='pretrained', action='store_true',
+                    help='use pre-trained model')
       
         args = parser.parse_args()
         args.sm = sm
