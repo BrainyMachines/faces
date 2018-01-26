@@ -14,6 +14,7 @@ import gc
 import sd_utils as utils
 from copy import deepcopy
 import torch
+import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
@@ -25,9 +26,11 @@ import joblib
 import faiss
 # import pyflann as flann
 import math
+import random
 
 def main(args):
 
+    cudnn.benchmark = True
     args.dset_root = os.path.join(args.sm.scratch_dir, args.data, args.dset_name)
     args.gen_root = os.path.join(args.sm.scratch_dir, args.gen)
     args.ckpt_dir = os.path.join(args.gen_root, 'ckpt')
@@ -80,6 +83,9 @@ def main(args):
     model = model.cuda()
     model_fe = ResNetFeatureExtractor(model)
     model_fe.train(False)
+
+    loss = nn.TripletMarginLoss(margin=1.0, p=2, eps=1e-6, swap=True)
+    loss = loss.cuda()
 
     args.model_file = os.path.join(args.ckpt_dir, 'fv_{:s}_{:s}.pth'.format(args.dset_name, args.arch))
     for epoch in range(args.num_epochs):
@@ -146,6 +152,7 @@ def main(args):
         # co = faiss.GpuClonerOptions()
         # co.useFloat16 = True
         for k in range(args.num_identities):
+            args.ann_file = os.path.join(args.ckpt_dir, 'ann_{:s}_{:s}_{:04d}.npz'.format(args.dset_name, args.arch, k))
             d = embedding_id[k].shape[1]
             neg_nlist = int(math.sqrt( math.sqrt(embedding_neg_id[k].shape[0])))
             print(embedding_id[k].shape)
@@ -185,10 +192,21 @@ def main(args):
                         if ann_dist[a_, p_] - ann_neg_dist[a_, n_] + args.margin >= 0:  # hard example: violates margin 
                             hard.append((a, p, n))
             print('#Tuples: ', len(hard))
+            joblib.dump({'ann_index': ann_index, 'ann_dist': ann_dist, 'ann_neg_index': ann_neg_index, 'ann_neg_dist': ann_neg_dist}, args.ann_file)
 
             index = None
             neg_index = None
             gc.collect()
+
+        # Forward - backward propation passes
+        random.shuffle(hard)
+        num_triplets = len(hard)
+        triplets = np.array(hard, dtype=np.int32)
+        bsize = args.batch_size_triplet
+        for t in range(0, num_triplets, bsize):
+            anchor = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 0].tolist(), axis=0).astype(np.float32)).cuda())
+            positive = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 1].tolist(), axis=0).astype(np.float32)).cuda())
+            negative = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 2].tolist(), axis=0).astype(np.float32)).cuda())
 
         gc.collect()
 
@@ -239,8 +257,10 @@ if __name__ == '__main__':
                             help='num of channels 3: colored, 1: grayscale (default: 3)')
         parser.add_argument('--dset_name', type=str, default='celeb10',
                             help='dataset name (default:celeb10)')
-        parser.add_argument('--batch_size', type=int, default=16,
-                            help='minibatch size (default: 16')
+        parser.add_argument('--batch_size', type=int, default=128,
+                            help='minibatch size (default: 128')
+        parser.add_argument('--batch_size_triplet', type=int, default=1024,
+                            help='minibatch size (default: 1024')
         parser.add_argument('--num_epochs', type=int, default=100,
                             help='number of epochs (default: 100')
         parser.add_argument('--num_identities', type=int, default=10,
