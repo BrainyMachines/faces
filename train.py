@@ -82,11 +82,13 @@ def main(args):
 
     model = model.cuda()
     model_fe = ResNetFeatureExtractor(model)
+
+    criterion = nn.TripletMarginLoss(margin=1.0, p=2, eps=1e-6, swap=True)
+    criterion = criterion.cuda()
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0)
+
     model_fe.train(False)
-
-    loss = nn.TripletMarginLoss(margin=1.0, p=2, eps=1e-6, swap=True)
-    loss = loss.cuda()
-
     args.model_file = os.path.join(args.ckpt_dir, 'fv_{:s}_{:s}.pth'.format(args.dset_name, args.arch))
     for epoch in range(args.num_epochs):
         logging.error('Epoch {:04d}'.format(epoch))
@@ -155,9 +157,6 @@ def main(args):
             args.ann_file = os.path.join(args.ckpt_dir, 'ann_{:s}_{:s}_{:04d}.npz'.format(args.dset_name, args.arch, k))
             d = embedding_id[k].shape[1]
             neg_nlist = int(math.sqrt( math.sqrt(embedding_neg_id[k].shape[0])))
-            print(embedding_id[k].shape)
-            print(embedding_neg_id[k].shape)
-            print()
             
             # Build index
             index = None
@@ -199,14 +198,26 @@ def main(args):
             gc.collect()
 
         # Forward - backward propation passes
+        model.train(True)
         random.shuffle(hard)
         num_triplets = len(hard)
         triplets = np.array(hard, dtype=np.int32)
         bsize = args.batch_size_triplet
         for t in range(0, num_triplets, bsize):
-            anchor = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 0].tolist(), axis=0).astype(np.float32)).cuda())
-            positive = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 1].tolist(), axis=0).astype(np.float32)).cuda())
-            negative = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 2].tolist(), axis=0).astype(np.float32)).cuda())
+            anchor = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 0].tolist(), axis=0).astype(np.float32)).cuda(),
+                              requires_grad=True)
+            positive = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 1].tolist(), axis=0).astype(np.float32)).cuda(),
+                                requires_grad=True)
+            negative = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 2].tolist(), axis=0).astype(np.float32)).cuda(),
+                                requires_grad=True)
+
+            loss = criterion(anchor, positive, negative)
+            loss_ = loss.data[0]
+            print('Loss = {:f}'.format(loss_))
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
         gc.collect()
 
