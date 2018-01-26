@@ -22,8 +22,9 @@ import torchvision.models as models
 from torch.autograd import Variable
 from models.resnet_feature_extractor import ResNetFeatureExtractor
 import joblib
-import pyflann as flann
-
+import faiss
+# import pyflann as flann
+import math
 
 def main(args):
 
@@ -82,6 +83,7 @@ def main(args):
 
     args.model_file = os.path.join(args.ckpt_dir, 'fv_{:s}_{:s}.pth'.format(args.dset_name, args.arch))
     for epoch in range(args.num_epochs):
+        logging.error('Epoch {:04d}'.format(epoch))
         embedding_id = [np.zeros((0, args.feature_dim), dtype=np.float32) for c in range(args.num_identities)]
         embedding_neg_id = [np.zeros((0, args.feature_dim), dtype=np.float32) for c in range(args.num_identities)]
         index_id = [[] for c in range(args.num_identities)]
@@ -109,15 +111,70 @@ def main(args):
             gc.collect()
         joblib.dump(embedding, args.model_file)
 
-        hard = []    
-        ann = [flann.FLANN() for i in range(args.num_identities)]
-        ann_neg = [flann.FLANN() for i in range(args.num_identities)]
+        # hard = []    
+        # ann = [flann.FLANN() for i in range(args.num_identities)]
+        # ann_neg = [flann.FLANN() for i in range(args.num_identities)]
+        # for k in range(args.num_identities):
+        #     args.ann_file = os.path.join(args.ckpt_dir, 'ann_{:s}_{:s}_{:04d}.npz'.format(args.dset_name, args.arch, k))
+        #     ann_params = ann[k].build_index(embedding_id[k], algorithm='autotuned', target_precision=0.9, log_level='error')
+        #     ann_index, ann_dist = ann[k].nn_index(embedding_id[k], embedding_id[k].shape[0], checks=ann_params['checks'])
+        #     ann_neg_params = ann_neg[k].build_index(embedding_neg_id[k], algorithm='autotuned', target_precision=0.9, log_level='error')
+        #     ann_neg_index, ann_neg_dist = ann_neg[k].nn_index(embedding_id[k], args.num_neighbors, checks=ann_neg_params['checks'])
+        #     for a_ in range(ann_index.shape[0]):
+        #         for p_ctr in range(args.num_neighbors):
+        #             p_ = int(ann_index.shape[1]) - 1  - p_ctr
+        #             a = index_id[k][a_]
+        #             for n_ in range(args.num_neighbors):
+        #                 p = index_id[k][ann_index[a_, p_]]
+        #                 n = index_neg_id[k][ann_neg_index[a_, n_]]
+        #                 if ann_dist[a_, p_] - ann_neg_dist[a_, n_] + args.margin >= 0:  # hard example: violates margin 
+        #                     hard.append((a, p, n))
+        #     print('#Tuples: ', len(hard))
+        #     print(hard)
+        #     joblib.dump({'ann_index': ann_index, 'ann_dist': ann_dist, 'ann_neg_index': ann_neg_index, 'ann_neg_dist': ann_neg_dist}, args.ann_file)
+        #     ann_params = None
+        #     ann_index = None
+        #     ann_dist = None
+        # ann = None
+
+        hard = []
+        res = faiss.StandardGpuResources()
+        flat_config = faiss.GpuIndexFlatConfig()
+        flat_config.device = 0
+        ivfflat_config = faiss.GpuIndexIVFFlatConfig()
+        ivfflat_config.device = 0
+        # co = faiss.GpuClonerOptions()
+        # co.useFloat16 = True
         for k in range(args.num_identities):
-            args.ann_file = os.path.join(args.ckpt_dir, 'ann_{:s}_{:s}_{:04d}.npz'.format(args.dset_name, args.arch, k))
-            ann_params = ann[k].build_index(embedding_id[k], algorithm='autotuned', target_precision=0.9, log_level='error')
-            ann_index, ann_dist = ann[k].nn_index(embedding_id[k], embedding_id[k].shape[0], checks=ann_params['checks'])
-            ann_neg_params = ann_neg[k].build_index(embedding_neg_id[k], algorithm='autotuned', target_precision=0.9, log_level='error')
-            ann_neg_index, ann_neg_dist = ann_neg[k].nn_index(embedding_id[k], args.num_neighbors, checks=ann_neg_params['checks'])
+            d = embedding_id[k].shape[1]
+            neg_nlist = int(math.sqrt( math.sqrt(embedding_neg_id[k].shape[0])))
+            print(embedding_id[k].shape)
+            print(embedding_neg_id[k].shape)
+            print()
+            
+            # Build index
+            index = None
+            index = faiss.GpuIndexFlatL2(res,  d, flat_config)
+            index.nprobe = args.nprobe_gpu_limit
+            assert index.is_trained
+            index.add(embedding_id[k])
+            neg_index = None
+            neg_index = faiss.GpuIndexIVFFlat(res, d, neg_nlist, faiss.METRIC_L2, ivfflat_config)
+            # neg_index = faiss.GpuIndexFlatL2(res, d, flat_config)
+            neg_index.nprobe = args.nprobe_gpu_limit
+            assert not neg_index.is_trained
+            neg_index.train(embedding_neg_id[k])
+            assert neg_index.is_trained
+            neg_index.add(embedding_neg_id[k])
+
+            # Search
+            ann_neg_dist, ann_neg_index = neg_index.search(embedding_id[k], args.num_neighbors)
+            # print(ann_neg_dist)
+            # print(ann_neg_index)
+            ann_dist, ann_index = index.search(embedding_id[k], args.num_neighbors)
+            # print(ann_index)
+
+            # Generate hard triplets
             for a_ in range(ann_index.shape[0]):
                 for p_ctr in range(args.num_neighbors):
                     p_ = int(ann_index.shape[1]) - 1  - p_ctr
@@ -128,12 +185,11 @@ def main(args):
                         if ann_dist[a_, p_] - ann_neg_dist[a_, n_] + args.margin >= 0:  # hard example: violates margin 
                             hard.append((a, p, n))
             print('#Tuples: ', len(hard))
-            print(hard)
-            joblib.dump({'ann_index': ann_index, 'ann_dist': ann_dist, 'ann_neg_index': ann_neg_index, 'ann_neg_dist': ann_neg_dist}, args.ann_file)
-            ann_params = None
-            ann_index = None
-            ann_dist = None
-        ann = None
+
+            index = None
+            neg_index = None
+            gc.collect()
+
         gc.collect()
 
 
@@ -191,6 +247,8 @@ if __name__ == '__main__':
                             help='number of identities (default: 10')
         parser.add_argument('--num_neighbors', type=int, default=10,
                             help='number of neighbors (default: 10')
+        parser.add_argument('--nprobe_gpu_limit', type=int, default=1024,
+                            help='nprobe limit for faiss(default: 1024')
         parser.add_argument('--margin', type=float, default=0.2,
                             help='margin for triplet loss (default: 0.2')
         parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet18',choices=model_names,
