@@ -88,6 +88,8 @@ def main(args):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0)
 
+    num_param_matrix = len(list(model.parameters()))
+    pnorm = np.zeros((args.num_epochs, num_param_matrix))
     model_fe.train(False)
     args.model_file = os.path.join(args.ckpt_dir, 'fv_{:s}_{:s}.pth'.format(args.dset_name, args.arch))
     for epoch in range(args.num_epochs):
@@ -219,7 +221,11 @@ def main(args):
             loss.backward()
             optimizer.step()
 
+        for pnorm_idx, param in enumerate(list(model.parameters())):
+            pnorm[epoch, pnorm_idx] = param.norm().clone().data[0]
+
         gc.collect()
+    print(pnorm)
 
 
 if __name__ == '__main__':
