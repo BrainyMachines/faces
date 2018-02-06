@@ -16,7 +16,7 @@ from copy import deepcopy
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
-import torchvision.datasets as datasets
+# import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 import torch.utils.data as data
 import torchvision.models as models
@@ -27,6 +27,8 @@ import faiss
 # import pyflann as flann
 import math
 import random
+from datasets.folder_ext import ImageFolderWithFilenames
+from samplers.triplet_sampler import TripletSampler
 
 def main(args):
 
@@ -56,10 +58,10 @@ def main(args):
 
     # Dataset
     args.dset_root_train = os.path.join(args.dset_root, 'train')
-    train_dset = datasets.ImageFolder(args.dset_root_train, transforms_train)
+    train_dset = ImageFolderWithFilenames(args.dset_root_train, transforms_train)
 
     args.dset_root_val = os.path.join(args.dset_root, 'val')
-    val_dset = datasets.ImageFolder(args.dset_root_val, transforms_val)
+    val_dset = ImageFolderWithFilenames(args.dset_root_val, transforms_val)
 
     # Data Loader 
     train_loader = data.DataLoader(train_dset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
@@ -86,9 +88,9 @@ def main(args):
     criterion = nn.TripletMarginLoss(margin=1.0, p=2, eps=1e-6, swap=True)
     criterion = criterion.cuda()
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0)
+    optimizer = torch.optim.Adam(model_fe.parameters(), lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0)
 
-    num_param_matrix = len(list(model.parameters()))
+    num_param_matrix = len(list(model_fe.parameters()))
     pnorm = np.zeros((args.num_epochs, num_param_matrix))
     model_fe.train(False)
     args.model_file = os.path.join(args.ckpt_dir, 'fv_{:s}_{:s}.pth'.format(args.dset_name, args.arch))
@@ -99,10 +101,12 @@ def main(args):
         index_id = [[] for c in range(args.num_identities)]
         index_neg_id = [[] for c in range(args.num_identities)]
         embedding = np.zeros((len(train_dset), args.feature_dim), dtype=np.float32)
+        img_fnames = []
         for i, mb in enumerate(train_loader):
-            img, target = mb
+            img, target, iname = mb
             fv = model_fe(Variable(img.cuda()))
             embedding[i*args.batch_size:(i+1)*args.batch_size,:] = fv.clone().data.cpu().numpy()
+            img_fnames.extend(iname)
             bs = fv.size(0)
             for j in range(bs):
                 # embedding_id[target[j]] = np.vstack((embedding_id[target[j]], fv[j,:].clone().data.cpu().numpy()))
@@ -117,6 +121,7 @@ def main(args):
             fv = None
             img = None
             target = None
+            iname = None
             mb = None
             gc.collect()
         joblib.dump(embedding, args.model_file)
@@ -201,18 +206,31 @@ def main(args):
 
         # Forward - backward propation passes
         model.train(True)
+        model_fe.train(True)
         random.shuffle(hard)
         num_triplets = len(hard)
         triplets = np.array(hard, dtype=np.int32)
-        bsize = args.batch_size_triplet
-        for t in range(0, num_triplets, bsize):
-            anchor = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 0].tolist(), axis=0).astype(np.float32)).cuda(),
-                              requires_grad=True)
-            positive = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 1].tolist(), axis=0).astype(np.float32)).cuda(),
-                                requires_grad=True)
-            negative = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 2].tolist(), axis=0).astype(np.float32)).cuda(),
-                                requires_grad=True)
+        hard_sampler = TripletSampler(triplets) 
+        bsize = 3 * args.batch_size_triplet
+        # # Data Loader for triplets 
+        train_loader_triplets = data.DataLoader(train_dset, batch_size=bsize, shuffle=False, num_workers=args.num_workers,
+                                       pin_memory=True, sampler=hard_sampler)
 
+        # for t in range(0, num_triplets, bsize):
+        #     anchor = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 0].tolist(), axis=0).astype(np.float32)).cuda(),
+        #                       requires_grad=True)
+        #     positive = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 1].tolist(), axis=0).astype(np.float32)).cuda(),
+        #                         requires_grad=True)
+        #     negative = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 2].tolist(), axis=0).astype(np.float32)).cuda(),
+        #                         requires_grad=True)
+        for i, mb in enumerate(train_loader_triplets):
+            img, target, iname = mb
+            if img.shape[0] < bsize: # drop the last incomplete batch
+                continue
+            fv = model_fe(Variable(img.cuda()))
+            anchor = fv.narrow(0, 0, args.batch_size_triplet)
+            positive = fv.narrow(0, args.batch_size_triplet, args.batch_size_triplet)
+            negative = fv.narrow(0, 2 * args.batch_size_triplet, args.batch_size_triplet)
             loss = criterion(anchor, positive, negative)
             loss_ = loss.data[0]
             print('Loss = {:f}'.format(loss_))
@@ -220,6 +238,12 @@ def main(args):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+            fv = None
+            img = None
+            target = None
+            iname = None
+            gc.collect()
 
         for pnorm_idx, param in enumerate(list(model.parameters())):
             pnorm[epoch, pnorm_idx] = param.norm().clone().data[0]
@@ -276,8 +300,8 @@ if __name__ == '__main__':
                             help='dataset name (default:celeb10)')
         parser.add_argument('--batch_size', type=int, default=128,
                             help='minibatch size (default: 128')
-        parser.add_argument('--batch_size_triplet', type=int, default=1024,
-                            help='minibatch size (default: 1024')
+        parser.add_argument('--batch_size_triplet', type=int, default=32,
+                            help='minibatch size (default: 32')
         parser.add_argument('--num_epochs', type=int, default=100,
                             help='number of epochs (default: 100')
         parser.add_argument('--num_identities', type=int, default=10,
