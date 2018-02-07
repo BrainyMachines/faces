@@ -210,7 +210,7 @@ def main(args):
         random.shuffle(hard)
         num_triplets = len(hard)
         triplets = np.array(hard, dtype=np.int32)
-        hard_sampler = TripletSampler(triplets) 
+        hard_sampler = TripletSampler(triplets, args.batch_size_triplet) 
         bsize = 3 * args.batch_size_triplet
         # # Data Loader for triplets 
         train_loader_triplets = data.DataLoader(train_dset, batch_size=bsize, shuffle=False, num_workers=args.num_workers,
@@ -223,6 +223,7 @@ def main(args):
         #                         requires_grad=True)
         #     negative = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 2].tolist(), axis=0).astype(np.float32)).cuda(),
         #                         requires_grad=True)
+        loss_epoch = 0.0
         for i, mb in enumerate(train_loader_triplets):
             img, target, iname = mb
             if img.shape[0] < bsize: # drop the last incomplete batch
@@ -233,7 +234,8 @@ def main(args):
             negative = fv.narrow(0, 2 * args.batch_size_triplet, args.batch_size_triplet)
             loss = criterion(anchor, positive, negative)
             loss_ = loss.data[0]
-            print('Loss = {:f}'.format(loss_))
+            #  print('Loss = {:f}'.format(loss_))
+            loss_epoch = float(loss_epoch * i + loss_) / float(i + 1) 
 
             optimizer.zero_grad()
             loss.backward()
@@ -245,6 +247,7 @@ def main(args):
             iname = None
             gc.collect()
 
+        print('Epoch {:d} : Loss = {:f}'.format(epoch, loss_))
         for pnorm_idx, param in enumerate(list(model.parameters())):
             pnorm[epoch, pnorm_idx] = param.norm().clone().data[0]
 
@@ -302,8 +305,8 @@ if __name__ == '__main__':
                             help='minibatch size (default: 128')
         parser.add_argument('--batch_size_triplet', type=int, default=32,
                             help='minibatch size (default: 32')
-        parser.add_argument('--num_epochs', type=int, default=100,
-                            help='number of epochs (default: 100')
+        parser.add_argument('--num_epochs', type=int, default=10,
+                            help='number of epochs (default: 10')
         parser.add_argument('--num_identities', type=int, default=10,
                             help='number of identities (default: 10')
         parser.add_argument('--num_neighbors', type=int, default=10,
