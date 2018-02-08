@@ -16,6 +16,7 @@ from copy import deepcopy
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
+import torch.optim as optim
 # import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 import torch.utils.data as data
@@ -88,13 +89,32 @@ def main(args):
     criterion = nn.TripletMarginLoss(margin=1.0, p=2, eps=1e-6, swap=True)
     criterion = criterion.cuda()
 
-    optimizer = torch.optim.Adam(model_fe.parameters(), lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0)
+    optimizer = optim.Adam(model_fe.parameters(),
+                           lr=1e-3,
+                           betas=(0.9, 0.999),
+                           eps=1e-8,
+                           weight_decay=0)
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer,
+    #                                                  mode='min', 
+    #                                                  factor=0.1, 
+    #                                                  patience=10,
+    #                                                  verbose=True,
+    #                                                  threshold=1e-4,
+    #                                                  threshold_mode='rel',
+    #                                                  cooldown=0,
+    #                                                  min_lr=0,
+    #                                                  eps=1e-8
+    #                                                  )
 
     num_param_matrix = len(list(model_fe.parameters()))
     pnorm = np.zeros((args.num_epochs, num_param_matrix))
     model_fe.train(False)
-    args.model_file = os.path.join(args.ckpt_dir, 'fv_{:s}_{:s}.pth'.format(args.dset_name, args.arch))
+    args.emb_fv_file = os.path.join(args.ckpt_dir, 'fv_{:s}_{:s}.npy'.format(args.dset_name, args.arch))
+
     for epoch in range(args.num_epochs):
+
+        ## STEP 1 : EMBED IMAGES INTO FEATURE VECTORS USING CURRENT MODEL
+
         logging.error('Epoch {:04d}'.format(epoch))
         embedding_id = [np.zeros((0, args.feature_dim), dtype=np.float32) for c in range(args.num_identities)]
         embedding_neg_id = [np.zeros((0, args.feature_dim), dtype=np.float32) for c in range(args.num_identities)]
@@ -124,8 +144,13 @@ def main(args):
             iname = None
             mb = None
             gc.collect()
-        joblib.dump(embedding, args.model_file)
+        # joblib.dump(embedding, args.emb_fv_file)
 
+
+        ## STEP 2 : COMPUTE (APPROXIMATE) NEAREST NEIGHBOURS 
+
+        ## Hard triplet mining with FLANN
+        ## Disabled as FAISS is used instead
         # hard = []    
         # ann = [flann.FLANN() for i in range(args.num_identities)]
         # ann_neg = [flann.FLANN() for i in range(args.num_identities)]
@@ -151,6 +176,9 @@ def main(args):
         #     ann_index = None
         #     ann_dist = None
         # ann = None
+
+
+        ## STEP 3: HARD NEGATIVE TRIPLET MINING
 
         hard = []
         res = faiss.StandardGpuResources()
@@ -197,14 +225,19 @@ def main(args):
                         n = index_neg_id[k][ann_neg_index[a_, n_]]
                         if ann_dist[a_, p_] - ann_neg_dist[a_, n_] + args.margin >= 0:  # hard example: violates margin 
                             hard.append((a, p, n))
-            print('#Tuples: ', len(hard))
-            joblib.dump({'ann_index': ann_index, 'ann_dist': ann_dist, 'ann_neg_index': ann_neg_index, 'ann_neg_dist': ann_neg_dist}, args.ann_file)
+            # print('#Tuples: ', len(hard))
+            # joblib.dump({'ann_index': ann_index, 'ann_dist': ann_dist,
+            #              'ann_neg_index': ann_neg_index, 'ann_neg_dist': ann_neg_dist},
+            #               args.ann_file
+            #            )
 
             index = None
             neg_index = None
             gc.collect()
 
-        # Forward - backward propation passes
+
+        ## STEP 4: TRAIN / EVAL BY BACKPROPAGATION
+
         model.train(True)
         model_fe.train(True)
         random.shuffle(hard)
@@ -216,6 +249,9 @@ def main(args):
         train_loader_triplets = data.DataLoader(train_dset, batch_size=bsize, shuffle=False, num_workers=args.num_workers,
                                        pin_memory=True, sampler=hard_sampler)
 
+
+        # Embedding without forward pass
+        # Disabled : computational graph requires forward pass     
         # for t in range(0, num_triplets, bsize):
         #     anchor = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 0].tolist(), axis=0).astype(np.float32)).cuda(),
         #                       requires_grad=True)
@@ -223,7 +259,11 @@ def main(args):
         #                         requires_grad=True)
         #     negative = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 2].tolist(), axis=0).astype(np.float32)).cuda(),
         #                         requires_grad=True)
-        loss_epoch = 0.0
+        
+
+            
+        # loss_epoch = 0.0
+        loss_epoch = utils.AverageMeter()
         for i, mb in enumerate(train_loader_triplets):
             img, target, iname = mb
             if img.shape[0] < bsize: # drop the last incomplete batch
@@ -234,8 +274,9 @@ def main(args):
             negative = fv.narrow(0, 2 * args.batch_size_triplet, args.batch_size_triplet)
             loss = criterion(anchor, positive, negative)
             loss_ = loss.data[0]
-            #  print('Loss = {:f}'.format(loss_))
-            loss_epoch = float(loss_epoch * i + loss_) / float(i + 1) 
+            # print('Loss = {:f}'.format(loss_))
+            # loss_epoch = float(loss_epoch * i + loss_) / float(i + 1) 
+            loss_epoch.update(loss_)
 
             optimizer.zero_grad()
             loss.backward()
@@ -251,6 +292,7 @@ def main(args):
         for pnorm_idx, param in enumerate(list(model.parameters())):
             pnorm[epoch, pnorm_idx] = param.norm().clone().data[0]
 
+        # scheduler.step()
         gc.collect()
     print(pnorm)
 
