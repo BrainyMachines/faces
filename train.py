@@ -35,6 +35,7 @@ from samplers.triplet_sampler import TripletSampler
 def embed(args, dset, loader, model_fe):
     """embeds images into feature vectors using current model."""
 
+    model_fe.train(False)
     embedding_id = [np.zeros((0, args.feature_dim), dtype=np.float32) for c in range(args.num_identities)]
     embedding_neg_id = [np.zeros((0, args.feature_dim), dtype=np.float32) for c in range(args.num_identities)]
     index_id = [[] for c in range(args.num_identities)]
@@ -125,6 +126,51 @@ def mine_triplets(args, embedding_id, index_id, embedding_neg_id, index_neg_id):
         neg_index = None
         gc.collect()
     return hard
+
+
+def learn(args, is_train, model_fe, criterion, optimizer, hard, dset):
+    """train / eval network."""
+
+    model_fe.train(is_train)
+    random.shuffle(hard)
+    num_triplets = len(hard)
+    triplets = np.array(hard, dtype=np.int32)
+    hard_sampler = TripletSampler(triplets, args.batch_size_triplet) 
+    bsize = 3 * args.batch_size_triplet
+    # # Data Loader for triplets 
+    dataloader_triplets = data.DataLoader(dset, batch_size=bsize, shuffle=False,
+                                            num_workers=args.num_workers,
+                                            pin_memory=True, sampler=hard_sampler,
+                                            drop_last=True)
+
+    # loss_epoch = 0.0
+    loss_epoch = utils.AverageMeter()
+    for i, mb in enumerate(dataloader_triplets):
+        img, target, iname = mb
+        if img.shape[0] < bsize: # drop the last incomplete batch
+            continue
+        fv = model_fe(Variable(img.cuda()))
+        anchor = fv.narrow(0, 0, args.batch_size_triplet)
+        positive = fv.narrow(0, args.batch_size_triplet, args.batch_size_triplet)
+        negative = fv.narrow(0, 2 * args.batch_size_triplet, args.batch_size_triplet)
+        loss = criterion(anchor, positive, negative)
+        loss_ = loss.data[0]
+        # print('Loss = {:f}'.format(loss_))
+        # loss_epoch = float(loss_epoch * i + loss_) / float(i + 1) 
+        loss_epoch.update(loss_)
+
+        if (is_train):
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        fv = None
+        img = None
+        target = None
+        iname = None
+        gc.collect()
+
+    return loss_epoch.avg
 
 
 def main(args):
@@ -218,68 +264,11 @@ def main(args):
         ## STEP 2: HARD NEGATIVE TRIPLET MINING
         train_hard = mine_triplets(args, train_embedding_id, train_index_id, train_embedding_neg_id, train_index_neg_id)
         
-        embedding = train_embedding
-        img_fnames = train_img_fnames
-        embedding_id = train_embedding_id
-        index_id = train_index_id
-        embedding_neg_id = train_embedding_neg_id
-        index_neg_id = train_index_neg_id
-        hard = train_hard
-
-        ## STEP 3: TRAIN / EVAL BY BACKPROPAGATION
-
-        model.train(True)
-        model_fe.train(True)
-        random.shuffle(hard)
-        num_triplets = len(hard)
-        triplets = np.array(hard, dtype=np.int32)
-        hard_sampler = TripletSampler(triplets, args.batch_size_triplet) 
-        bsize = 3 * args.batch_size_triplet
-        # # Data Loader for triplets 
-        train_loader_triplets = data.DataLoader(train_dset, batch_size=bsize, shuffle=False, num_workers=args.num_workers,
-                                       pin_memory=True, sampler=hard_sampler)
-
-
-        # Embedding without forward pass
-        # Disabled : computational graph requires forward pass     
-        # for t in range(0, num_triplets, bsize):
-        #     anchor = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 0].tolist(), axis=0).astype(np.float32)).cuda(),
-        #                       requires_grad=True)
-        #     positive = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 1].tolist(), axis=0).astype(np.float32)).cuda(),
-        #                         requires_grad=True)
-        #     negative = Variable(torch.FloatTensor(np.take(embedding, triplets[t:t+bsize, 2].tolist(), axis=0).astype(np.float32)).cuda(),
-        #                         requires_grad=True)
+        ## STEP 3: TRAIN / EVAL NETWORK
+        loss_epoch = learn(args, True, model_fe, criterion, optimizer, train_hard, train_dset)
         
-
-            
-        # loss_epoch = 0.0
-        loss_epoch = utils.AverageMeter()
-        for i, mb in enumerate(train_loader_triplets):
-            img, target, iname = mb
-            if img.shape[0] < bsize: # drop the last incomplete batch
-                continue
-            fv = model_fe(Variable(img.cuda()))
-            anchor = fv.narrow(0, 0, args.batch_size_triplet)
-            positive = fv.narrow(0, args.batch_size_triplet, args.batch_size_triplet)
-            negative = fv.narrow(0, 2 * args.batch_size_triplet, args.batch_size_triplet)
-            loss = criterion(anchor, positive, negative)
-            loss_ = loss.data[0]
-            # print('Loss = {:f}'.format(loss_))
-            # loss_epoch = float(loss_epoch * i + loss_) / float(i + 1) 
-            loss_epoch.update(loss_)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            fv = None
-            img = None
-            target = None
-            iname = None
-            gc.collect()
-
-        print('Epoch {:d} : Loss = {:f}'.format(epoch, loss_))
-        for pnorm_idx, param in enumerate(list(model.parameters())):
+        print('Epoch {:d} : Loss = {:f}'.format(epoch, loss_epoch))
+        for pnorm_idx, param in enumerate(list(model_fe.parameters())):
             pnorm[epoch, pnorm_idx] = param.norm().clone().data[0]
 
         # scheduler.step()
