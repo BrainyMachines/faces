@@ -67,6 +67,66 @@ def embed(args, dset, loader, model_fe):
     return embedding, img_fnames, embedding_id, index_id, embedding_neg_id, index_neg_id
 
 
+def mine_triplets(args, embedding_id, index_id, embedding_neg_id, index_neg_id):
+    """Mine hard triplets which violate margin constraints."""
+
+    hard = []
+    res = faiss.StandardGpuResources()
+    flat_config = faiss.GpuIndexFlatConfig()
+    flat_config.device = 0
+    ivfflat_config = faiss.GpuIndexIVFFlatConfig()
+    ivfflat_config.device = 0
+    # co = faiss.GpuClonerOptions()
+    # co.useFloat16 = True
+    for k in range(args.num_identities):
+        # args.ann_file = os.path.join(args.ckpt_dir, 'ann_{:s}_{:s}_{:04d}.npz'.format(args.dset_name, args.arch, k))
+        d = embedding_id[k].shape[1]
+        neg_nlist = int(math.sqrt( math.sqrt(embedding_neg_id[k].shape[0])))
+        
+        # Build index
+        index = None
+        index = faiss.GpuIndexFlatL2(res, d, flat_config)
+        index.nprobe = args.nprobe_gpu_limit
+        assert index.is_trained
+        index.add(embedding_id[k])
+        neg_index = None
+        neg_index = faiss.GpuIndexIVFFlat(res, d, neg_nlist, faiss.METRIC_L2, ivfflat_config)
+        # neg_index = faiss.GpuIndexFlatL2(res, d, flat_config)
+        neg_index.nprobe = args.nprobe_gpu_limit
+        assert not neg_index.is_trained
+        neg_index.train(embedding_neg_id[k])
+        assert neg_index.is_trained
+        neg_index.add(embedding_neg_id[k])
+
+        # Search
+        ann_neg_dist, ann_neg_index = neg_index.search(embedding_id[k], args.num_neighbors)
+        # print(ann_neg_dist)
+        # print(ann_neg_index)
+        ann_dist, ann_index = index.search(embedding_id[k], args.num_neighbors)
+        # print(ann_index)
+
+        # Generate hard triplets
+        for a_ in range(ann_index.shape[0]):
+            for p_ctr in range(args.num_neighbors):
+                p_ = int(ann_index.shape[1]) - 1  - p_ctr
+                a = index_id[k][a_]
+                for n_ in range(args.num_neighbors):
+                    p = index_id[k][ann_index[a_, p_]]
+                    n = index_neg_id[k][ann_neg_index[a_, n_]]
+                    if ann_dist[a_, p_] - ann_neg_dist[a_, n_] + args.margin >= 0:  # hard example: violates margin 
+                        hard.append((a, p, n))
+        # print('#Tuples: ', len(hard))
+        # joblib.dump({'ann_index': ann_index, 'ann_dist': ann_dist,
+        #              'ann_neg_index': ann_neg_index, 'ann_neg_dist': ann_neg_dist},
+        #               args.ann_file
+        #            )
+
+        index = None
+        neg_index = None
+        gc.collect()
+    return hard
+
+
 def main(args):
 
     cudnn.benchmark = True
@@ -152,70 +212,21 @@ def main(args):
         logging.error('Epoch {:04d}'.format(epoch))
 
         ## STEP 1 : EMBED IMAGES INTO FEATURE VECTORS USING CURRENT MODEL
-
-        embedding, img_fnames, embedding_id, index_id, embedding_neg_id, index_neg_id = \
+        train_embedding, train_img_fnames, train_embedding_id, train_index_id, train_embedding_neg_id, train_index_neg_id = \
             embed(args, train_dset, train_loader, model_fe)
         
-        
         ## STEP 2: HARD NEGATIVE TRIPLET MINING
+        train_hard = mine_triplets(args, train_embedding_id, train_index_id, train_embedding_neg_id, train_index_neg_id)
+        
+        embedding = train_embedding
+        img_fnames = train_img_fnames
+        embedding_id = train_embedding_id
+        index_id = train_index_id
+        embedding_neg_id = train_embedding_neg_id
+        index_neg_id = train_index_neg_id
+        hard = train_hard
 
-        hard = []
-        res = faiss.StandardGpuResources()
-        flat_config = faiss.GpuIndexFlatConfig()
-        flat_config.device = 0
-        ivfflat_config = faiss.GpuIndexIVFFlatConfig()
-        ivfflat_config.device = 0
-        # co = faiss.GpuClonerOptions()
-        # co.useFloat16 = True
-        for k in range(args.num_identities):
-            args.ann_file = os.path.join(args.ckpt_dir, 'ann_{:s}_{:s}_{:04d}.npz'.format(args.dset_name, args.arch, k))
-            d = embedding_id[k].shape[1]
-            neg_nlist = int(math.sqrt( math.sqrt(embedding_neg_id[k].shape[0])))
-            
-            # Build index
-            index = None
-            index = faiss.GpuIndexFlatL2(res,  d, flat_config)
-            index.nprobe = args.nprobe_gpu_limit
-            assert index.is_trained
-            index.add(embedding_id[k])
-            neg_index = None
-            neg_index = faiss.GpuIndexIVFFlat(res, d, neg_nlist, faiss.METRIC_L2, ivfflat_config)
-            # neg_index = faiss.GpuIndexFlatL2(res, d, flat_config)
-            neg_index.nprobe = args.nprobe_gpu_limit
-            assert not neg_index.is_trained
-            neg_index.train(embedding_neg_id[k])
-            assert neg_index.is_trained
-            neg_index.add(embedding_neg_id[k])
-
-            # Search
-            ann_neg_dist, ann_neg_index = neg_index.search(embedding_id[k], args.num_neighbors)
-            # print(ann_neg_dist)
-            # print(ann_neg_index)
-            ann_dist, ann_index = index.search(embedding_id[k], args.num_neighbors)
-            # print(ann_index)
-
-            # Generate hard triplets
-            for a_ in range(ann_index.shape[0]):
-                for p_ctr in range(args.num_neighbors):
-                    p_ = int(ann_index.shape[1]) - 1  - p_ctr
-                    a = index_id[k][a_]
-                    for n_ in range(args.num_neighbors):
-                        p = index_id[k][ann_index[a_, p_]]
-                        n = index_neg_id[k][ann_neg_index[a_, n_]]
-                        if ann_dist[a_, p_] - ann_neg_dist[a_, n_] + args.margin >= 0:  # hard example: violates margin 
-                            hard.append((a, p, n))
-            # print('#Tuples: ', len(hard))
-            # joblib.dump({'ann_index': ann_index, 'ann_dist': ann_dist,
-            #              'ann_neg_index': ann_neg_index, 'ann_neg_dist': ann_neg_dist},
-            #               args.ann_file
-            #            )
-
-            index = None
-            neg_index = None
-            gc.collect()
-
-
-        ## STEP 4: TRAIN / EVAL BY BACKPROPAGATION
+        ## STEP 3: TRAIN / EVAL BY BACKPROPAGATION
 
         model.train(True)
         model_fe.train(True)
