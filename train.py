@@ -68,17 +68,17 @@ def embed(args, dset, loader, model_fe):
     return embedding, img_fnames, embedding_id, index_id, embedding_neg_id, index_neg_id
 
 
-def mine_triplets(args, embedding_id, index_id, embedding_neg_id, index_neg_id):
+def mine_triplets(args, res, flat_config, ivfflat_config, embedding_id, index_id, embedding_neg_id, index_neg_id):
     """Mine hard triplets which violate margin constraints."""
 
     hard = []
-    res = faiss.StandardGpuResources()
-    flat_config = faiss.GpuIndexFlatConfig()
-    flat_config.device = 0
-    ivfflat_config = faiss.GpuIndexIVFFlatConfig()
-    ivfflat_config.device = 0
-    # co = faiss.GpuClonerOptions()
-    # co.useFloat16 = True
+    # res = faiss.StandardGpuResources()
+    # flat_config = faiss.GpuIndexFlatConfig()
+    # flat_config.device = 0
+    # ivfflat_config = faiss.GpuIndexIVFFlatConfig()
+    # ivfflat_config.device = 0
+    ## co = faiss.GpuClonerOptions()
+    ## co.useFloat16 = True
     for k in range(args.num_identities):
         # args.ann_file = os.path.join(args.ckpt_dir, 'ann_{:s}_{:s}_{:04d}.npz'.format(args.dset_name, args.arch, k))
         d = embedding_id[k].shape[1]
@@ -122,9 +122,13 @@ def mine_triplets(args, embedding_id, index_id, embedding_neg_id, index_neg_id):
         #               args.ann_file
         #            )
 
+        index.reset()
+        neg_index.reset()
         index = None
         neg_index = None
         gc.collect()
+    # res = None
+    gc.collect()
     return hard
 
 
@@ -207,8 +211,18 @@ def main(args):
     val_dset = ImageFolderWithFilenames(args.dset_root_val, transforms_val)
 
     # Data Loader 
-    train_loader = data.DataLoader(train_dset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
-    val_loader = data.DataLoader(val_dset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    train_loader = data.DataLoader(train_dset,
+                                   batch_size=args.batch_size,
+                                   shuffle=True,
+                                   num_workers=args.num_workers,
+                                   pin_memory=True
+                                  )
+    val_loader = data.DataLoader(val_dset,
+                                 batch_size=args.batch_size,
+                                 shuffle=False,
+                                 num_workers=args.num_workers,
+                                 pin_memory=True
+                                )
 
     # Uncomment to test data loader
     # itr = iter(train_loader)
@@ -253,6 +267,11 @@ def main(args):
     model_fe.train(False)
     args.emb_fv_file = os.path.join(args.ckpt_dir, 'fv_{:s}_{:s}.npy'.format(args.dset_name, args.arch))
 
+    res = faiss.StandardGpuResources()
+    flat_config = faiss.GpuIndexFlatConfig()
+    flat_config.device = 0
+    ivfflat_config = faiss.GpuIndexIVFFlatConfig() 
+
     for epoch in range(args.num_epochs):
 
         logging.error('Epoch {:04d}'.format(epoch))
@@ -260,19 +279,28 @@ def main(args):
         ## STEP 1 : EMBED IMAGES INTO FEATURE VECTORS USING CURRENT MODEL
         train_embedding, train_img_fnames, train_embedding_id, train_index_id, train_embedding_neg_id, train_index_neg_id = \
             embed(args, train_dset, train_loader, model_fe)
+        val_embedding, val_img_fnames, val_embedding_id, val_index_id, val_embedding_neg_id, val_index_neg_id = \
+            embed(args, val_dset, val_loader, model_fe)
         
         ## STEP 2: HARD NEGATIVE TRIPLET MINING
-        train_hard = mine_triplets(args, train_embedding_id, train_index_id, train_embedding_neg_id, train_index_neg_id)
-        
+        train_hard = mine_triplets(args, res, flat_config, ivfflat_config, train_embedding_id, train_index_id, train_embedding_neg_id, train_index_neg_id)
+        val_hard = mine_triplets(args, res, flat_config, ivfflat_config, val_embedding_id, val_index_id, val_embedding_neg_id, val_index_neg_id)
+
         ## STEP 3: TRAIN / EVAL NETWORK
-        loss_epoch = learn(args, True, model_fe, criterion, optimizer, train_hard, train_dset)
+        train_loss_epoch = learn(args, True, model_fe, criterion, optimizer, train_hard, train_dset)
+        val_loss_epoch = learn(args, False, model_fe, criterion, optimizer, val_hard, val_dset)
         
-        print('Epoch {:d} : Loss = {:f}'.format(epoch, loss_epoch))
+        print('Epoch {:d} : Train Loss = {:f} Val Loss = {:f}'.format(epoch, train_loss_epoch, val_loss_epoch))
+        # print('Epoch {:d} : Train Loss = {:f}'.format(epoch, train_loss_epoch))
+
+        # Norm of parameter matrices at each layer
         for pnorm_idx, param in enumerate(list(model_fe.parameters())):
             pnorm[epoch, pnorm_idx] = param.norm().clone().data[0]
 
         # scheduler.step()
         gc.collect()
+
+    # Check to see if weights update
     print(pnorm)
 
 
@@ -322,8 +350,8 @@ if __name__ == '__main__':
                             help='num of channels 3: colored, 1: grayscale (default: 3)')
         parser.add_argument('--dset_name', type=str, default='celeb10',
                             help='dataset name (default:celeb10)')
-        parser.add_argument('--batch_size', type=int, default=128,
-                            help='minibatch size (default: 128')
+        parser.add_argument('--batch_size', type=int, default=64,
+                            help='minibatch size (default: 64')
         parser.add_argument('--batch_size_triplet', type=int, default=32,
                             help='minibatch size (default: 32')
         parser.add_argument('--num_epochs', type=int, default=10,
